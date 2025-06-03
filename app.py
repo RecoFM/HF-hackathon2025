@@ -2,7 +2,7 @@ from typing import List, Optional, Dict, Any, Union
 import os
 import gradio as gr
 from mistralai.client import MistralClient
-from mistralai.models.chat_completion import ChatMessage
+# from mistralai.models.chat_completion import ChatMessage
 from dotenv import load_dotenv
 from dataclasses import dataclass
 
@@ -73,26 +73,55 @@ def create_interface(config: Config) -> gr.Interface:
         title=config.title,
         description=config.description
     )
+    
+def create_gradio_interface() -> None:
+    """
+    Create Gradio interface and run it
+    """
+    movies = [
+        "The Godfather", "Star Wars", "The Dark Knight", "Pulp Fiction",
+        "The Lord of the Rings", "Forrest Gump", "Inception", "Fight Club",
+        "The Matrix", "Goodfellas"
+    ]
+
+    def show_selected(movie_list):
+        return f"You selected: {', '.join(movie_list)}"
+
+    with gr.Blocks() as demo:
+        movie_selector = gr.Dropdown(
+            label="Select Movies",
+            choices=movies,
+            multiselect=True,
+            allow_custom_value=True,  # user can also type something new
+            filterable=True
+        )
+        output_box = gr.Textbox(label="Output", interactive=False)
+        submit_btn = gr.Button("Submit")
+
+        submit_btn.click(fn=show_selected, inputs=movie_selector, outputs=output_box)
+
+    demo.launch()
 
 def main() -> None:
-    # Load environment variables
-    load_dotenv()
+    # # Load environment variables
+    # load_dotenv()
 
-    # Check for API key
-    api_key = os.getenv("MISTRAL_API_KEY")
-    if not api_key:
-        raise ValueError("MISTRAL_API_KEY not found in environment variables")
+    # # Check for API key
+    # api_key = os.getenv("MISTRAL_API_KEY")
+    # if not api_key:
+    #     raise ValueError("MISTRAL_API_KEY not found in environment variables")
 
-    # Initialize Mistral client
-    global client
-    client = MistralClient(api_key=api_key)
+    # # Initialize Mistral client
+    # global client
+    # client = MistralClient(api_key=api_key)
     
-    # Initialize configuration
-    config = Config()
+    # # Initialize configuration
+    # config = Config()
     
-    # Create and launch interface
-    interface = create_interface(config)
-    interface.launch(share=config.share, inbrowser=config.inbrowser)
+    # # Create and launch interface
+    # interface = create_interface(config)
+    # interface.launch(share=config.share, inbrowser=config.inbrowser)
+    create_gradio_interface()
 
 if __name__ == "__main__":
     main() 
