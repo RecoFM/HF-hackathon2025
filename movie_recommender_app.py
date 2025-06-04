@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple, Optional, Literal
 from mistralai import Mistral
 import os
 from dotenv import load_dotenv
+from ranking_agent import rank_with_ai
 
 load_dotenv()
 
@@ -215,20 +216,15 @@ def create_interface():
         Get personalized movie recommendations based on your taste and preferences!
         
         **How to use:**
-        1. Type to search for movies you've enjoyed
-        2. Select them from the dropdown (up to 5 movies)
-        3. Optionally, describe what kind of movie you're looking for
-        4. Adjust the preference weight (alpha) to balance between your description and movie history
-        5. Choose embedding type:
-           - LLM: Pure language model embeddings
-           - LLM + GCL: Graph-enhanced language model embeddings
-        6. Click 'Get Recommendations' to see similar movies
-        
-        The similarity score (0-1) shows how close each recommendation is to your preferences.
+        1. Search and select up to 5 movies you've enjoyed
+        2. Describe what kind of movie you're looking for (optional)
+        3. Adjust the preference weight (α) to balance between your description and movie history
+        4. Get personalized recommendations
         """
         )
         
         selected_movies = gr.State([])
+        retrieval_results = gr.State([])  # Store retrieval results for ranking
         
         with gr.Row():
             with gr.Column():
@@ -240,12 +236,18 @@ def create_interface():
                     allow_custom_value=True
                 )
                 
-                # Display selected movies
-                selected_display = gr.Textbox(
-                    label="Your Selected Movies",
-                    value="No movies selected yet",
-                    interactive=False
-                )
+                # Display selected movies with delete buttons
+                with gr.Column(elem_id="selected_movies_container") as selected_movies_container:
+                    selected_display = gr.Markdown(
+                        label="Your Selected Movies",
+                        value="No movies selected yet"
+                    )
+                    with gr.Row() as delete_row:
+                        delete_buttons = []
+                        for i in range(5):  # Maximum 5 movies
+                            delete_buttons.append(
+                                gr.Button("🗑️ Delete Movie " + str(i+1), visible=False, size="sm", min_width=100)
+                            )
                 
                 # User preferences text field
                 user_preferences = gr.Textbox(
@@ -264,10 +266,10 @@ def create_interface():
                     info="0: Use only movie history, 1: Use only your description"
                 )
                 
-                # Embedding type selection
+                # Embedding type selection (defaulting to GCL)
                 embedding_type = gr.Radio(
-                    choices=["LLM", "LLM + GCL"],
-                    value="LLM",
+                    choices=["LLM + GCL", "LLM"],
+                    value="LLM + GCL",
                     label="Embedding Type",
                     info="Choose between pure language model embeddings (LLM) or graph-enhanced embeddings (LLM + GCL)"
                 )
@@ -279,12 +281,10 @@ def create_interface():
                 recommend_btn = gr.Button("Get Recommendations", variant="primary")
             
             with gr.Column():
-                # Display recommendations
-                recommendations = gr.Textbox(
-                    label="Recommended Movies",
-                    value="Recommendations will appear here",
-                    interactive=False,
-                    lines=10
+                # Display recommendations with streaming
+                recommendations = gr.Markdown(
+                    label="Your Personalized Recommendations",
+                    value="Recommendations will appear here"
                 )
         
         def update_search_options(query):
@@ -293,44 +293,94 @@ def create_interface():
             matches = recommender.search_movies(query)
             return gr.Dropdown(choices=matches)
         
+        def delete_movie(btn_idx, current_movies):
+            if not current_movies or btn_idx >= len(current_movies):
+                button_visibility = [False] * 5
+                return (
+                    current_movies, 
+                    format_selected_movies_with_buttons(current_movies),
+                    *button_visibility  # Unpack the list of button visibilities
+                )
+            
+            current_movies.pop(btn_idx)
+            button_visibility = [i < len(current_movies) for i in range(5)]
+            return (
+                current_movies, 
+                format_selected_movies_with_buttons(current_movies),
+                *button_visibility  # Unpack the list of button visibilities
+            )
+        
+        def format_selected_movies_with_buttons(movies):
+            if not movies:
+                return "No movies selected yet"
+            # Format each movie with a number
+            return "\n".join(f"{i+1}. {movie}" for i, movie in enumerate(movies))
+        
         def add_movie(movie, current_movies):
             if not movie:
-                return current_movies, format_selected_movies(current_movies)
+                return (
+                    current_movies, 
+                    format_selected_movies_with_buttons(current_movies),
+                    *[i < len(current_movies) for i in range(5)]
+                )
                 
             current_movies = current_movies or []
             if len(current_movies) >= 5:
-                return current_movies, format_selected_movies(current_movies)
+                return (
+                    current_movies, 
+                    format_selected_movies_with_buttons(current_movies),
+                    *[i < len(current_movies) for i in range(5)]
+                )
                 
             if movie not in current_movies:
                 current_movies.append(movie)
             
-            return current_movies, format_selected_movies(current_movies)
+            # Update button visibility
+            button_visibility = [i < len(current_movies) for i in range(5)]
+            
+            return (
+                current_movies, 
+                format_selected_movies_with_buttons(current_movies),
+                *button_visibility
+            )
         
         def clear_selection(current_movies):
-            return [], "No movies selected yet"
-        
-        def format_selected_movies(movies):
-            if not movies:
-                return "No movies selected yet"
-            return "\n".join(f"{i+1}. {movie}" for i, movie in enumerate(movies))
-        
-        def format_recommendations(recommendations):
-            if not recommendations:
-                return "No recommendations available yet"
-            return "\n".join(
-                f"{i+1}. {title} (similarity: {score:.3f})" 
-                for i, (title, score) in enumerate(recommendations)
-            )
+            button_visibility = [False] * 5
+            return [], "No movies selected yet", *button_visibility
         
         def get_recommendations(movies, emb_type, preferences, pref_weight):
-            return format_recommendations(
-                recommender.get_recommendations(
-                    movies, 
-                    emb_type,
-                    user_preferences=preferences,
-                    alpha=pref_weight
-                )
+            if not movies and not preferences:
+                return "Please select some movies or provide preferences"
+                
+            # First get retrieval recommendations
+            retrieval_results = recommender.get_recommendations(
+                movies, 
+                emb_type,
+                user_preferences=preferences,
+                alpha=pref_weight
             )
+            
+            if not retrieval_results:
+                return "No recommendations available yet"
+            
+            # Prepare context for AI ranking
+            context = {
+                "user_intention": preferences if preferences else "No specific preferences provided",
+                "user_history": movies if movies else "No movie history provided",
+                "preference_weight": pref_weight,
+                "candidates": [title for title, _ in retrieval_results]
+            }
+            
+            # Get AI ranking and explanations with streaming
+            result = "## Your Personalized Recommendations\n\n"
+            yield result + "Analyzing your preferences..."
+            
+            for ranked_results in rank_with_ai(context):
+                result = "## Your Personalized Recommendations\n\n"
+                for i, (title, explanation) in enumerate(ranked_results, 1):
+                    result += f"### {i}. {title}\n"
+                    result += f"{explanation}\n\n"
+                yield result
         
         # Event handlers
         movie_search.change(
@@ -342,14 +392,22 @@ def create_interface():
         movie_search.select(
             fn=add_movie,
             inputs=[movie_search, selected_movies],
-            outputs=[selected_movies, selected_display]
+            outputs=[selected_movies, selected_display] + delete_buttons
         )
         
         clear_btn.click(
             fn=clear_selection,
             inputs=[selected_movies],
-            outputs=[selected_movies, selected_display]
+            outputs=[selected_movies, selected_display] + delete_buttons
         )
+        
+        # Add delete button handlers
+        for i, btn in enumerate(delete_buttons):
+            btn.click(
+                fn=delete_movie,
+                inputs=[gr.Number(value=i, visible=False), selected_movies],
+                outputs=[selected_movies, selected_display] + delete_buttons
+            )
         
         recommend_btn.click(
             fn=get_recommendations,

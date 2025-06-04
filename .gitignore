@@ -35,6 +35,7 @@ ENV/
 *.npy  # Numpy data files
 *.gz   # Downloaded dataset files
 downloads/
+.env   # Environment variables file
 
 # OS specific
 .DS_Store
