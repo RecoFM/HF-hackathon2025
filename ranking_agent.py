@@ -1,5 +1,8 @@
 from typing import List, Dict, Tuple
-from mistralai import Mistral
+from langchain_mistralai import ChatMistralAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 import os
 from dotenv import load_dotenv
 
@@ -27,15 +30,51 @@ Your task has three key aspects:
 - Explain why each movie is personally relevant
 - Connect recommendations to user's preferences and history
 - Highlight specific aspects that make it a good fit
-- Be concise but insightful (2-3 sentences per movie)
+- Be concise but insightful (1-2 sentences per movie)
 
-Remember:
+IMPORTANT REQUIREMENTS:
+- You MUST provide EXACTLY 20 recommendations from the candidate list
+- Number each recommendation from 1 to 20
+- Keep explanations concise to maintain a good pace
 - Focus on personal relevance over general movie quality
-- Consider both content similarity and emotional resonance
 - Be specific in your explanations, avoiding generic statements
-- Maintain a warm, conversational tone while being informative
+- Maintain a warm, conversational tone while being informative"""
 
-Your output should be a reranked list of movies, each with a personalized explanation of why it's a good match for this specific user in this specific context."""
+def create_chain():
+    """Create a LangChain chain for movie recommendations"""
+    # Initialize the LLM
+    llm = ChatMistralAI(
+        model="mistral-large-latest",
+        mistral_api_key=os.getenv("MISTRAL_API_KEY"),
+        streaming=True,
+        temperature=0.7
+    )
+    
+    # Create the chain
+    chain = (
+        RunnablePassthrough()
+        | {
+            "system": lambda _: SYSTEM_PROMPT,
+            "user": lambda x: f"""Please rerank and provide explanations for EXACTLY 20 movies from the following candidates, based on this context:
+
+User's Intention: {x['user_intention']}
+
+Movie History: {x['user_history']}
+
+Preference Weight (α): {x['preference_weight']}
+(0 = focus on history, 1 = focus on stated preferences)
+
+Candidate Movies:
+{chr(10).join(f'- {movie}' for movie in x['candidates'])}
+
+IMPORTANT: You MUST provide EXACTLY 20 recommendations, numbered from 1 to 20. For each movie, start with the number, then the title, then a brief 1-2 sentence explanation of why it's a good match."""
+        }
+        | (lambda x: [SystemMessage(content=x["system"]), HumanMessage(content=x["user"])])
+        | llm
+        | StrOutputParser()
+    )
+    
+    return chain
 
 def rank_with_ai(context: Dict) -> List[Tuple[str, str]]:
     """
@@ -51,31 +90,15 @@ def rank_with_ai(context: Dict) -> List[Tuple[str, str]]:
     Returns:
         List of (movie_title, explanation) tuples in ranked order
     """
-    client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
+    # Ensure we have enough candidates
+    if len(context['candidates']) < 20:
+        print(f"Warning: Only {len(context['candidates'])} candidates available")
+        # Duplicate some movies if needed to reach 20
+        while len(context['candidates']) < 20:
+            context['candidates'].extend(context['candidates'][:20 - len(context['candidates'])])
     
-    # Prepare the prompt
-    user_message = f"""Please rerank these movie recommendations based on the following context:
-
-User's Intention: {context['user_intention']}
-
-Movie History: {context['user_history']}
-
-Preference Weight (α): {context['preference_weight']}
-(0 = focus on history, 1 = focus on stated preferences)
-
-Candidate Movies:
-{chr(10).join(f'- {movie}' for movie in context['candidates'])}
-
-Please provide the reranked list with brief, personalized explanations for why each movie is a good match. For each movie, start with the number, then the title, then the explanation."""
-
-    # Get AI response with streaming
-    stream_response = client.chat.stream(
-        model="mistral-large-latest",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message}
-        ]
-    )
+    # Create the chain if not already created
+    chain = create_chain()
     
     # Parse response and extract recommendations with explanations
     recommendations = []
@@ -84,50 +107,49 @@ Please provide the reranked list with brief, personalized explanations for why e
     buffer = []
     
     try:
-        for chunk in stream_response:
-            if chunk.data.choices[0].delta.content:
-                content = chunk.data.choices[0].delta.content
-                buffer.append(content)
-                current_text = ''.join(buffer)
+        # Stream the response
+        for chunk in chain.stream(context):
+            buffer.append(chunk)
+            current_text = ''.join(buffer)
+            
+            # Check if we have complete lines
+            if '\n' in chunk:
+                lines = current_text.split('\n')
+                buffer = [lines[-1]]  # Keep the incomplete line in buffer
                 
-                # Check if we have a complete line
-                if '\n' in content:
-                    lines = current_text.split('\n')
-                    buffer = [lines[-1]]  # Keep the incomplete line in buffer
-                    
-                    for line in lines[:-1]:  # Process complete lines
-                        line = line.strip()
-                        if not line:
-                            continue
-                            
-                        # Check if this is a new movie entry
-                        if any(line.startswith(f"{i}.") for i in range(1, 21)):
-                            # Save previous movie if exists
-                            if current_movie and current_explanation:
-                                recommendations.append((current_movie, ' '.join(current_explanation)))
-                                yield recommendations
-                            
-                            # Start new movie
-                            try:
-                                # Extract movie title (everything between the number and the next sentence)
-                                parts = line.split('.', 1)
-                                if len(parts) > 1:
-                                    title_and_explanation = parts[1].strip()
-                                    # Find the first sentence boundary after the title
-                                    sentences = title_and_explanation.split('. ')
-                                    current_movie = sentences[0].strip()
-                                    if len(sentences) > 1:
-                                        current_explanation = ['. '.join(sentences[1:])]
-                                    else:
-                                        current_explanation = []
-                            except Exception as e:
-                                print(f"Error parsing movie line: {str(e)}")
-                                continue
+                for line in lines[:-1]:  # Process complete lines
+                    line = line.strip()
+                    if not line:
+                        continue
                         
-                        # If we have a current movie, add to its explanation
-                        elif current_movie and line:
-                            current_explanation.append(line)
-                            yield recommendations + [(current_movie, ' '.join(current_explanation))]
+                    # Check if this is a new movie entry (1-20)
+                    if any(line.startswith(f"{i}.") for i in range(1, 21)):
+                        # Save previous movie if exists
+                        if current_movie and current_explanation:
+                            recommendations.append((current_movie, ' '.join(current_explanation)))
+                            yield recommendations
+                        
+                        # Start new movie
+                        try:
+                            # Extract movie title (everything between the number and the next sentence)
+                            parts = line.split('.', 1)
+                            if len(parts) > 1:
+                                title_and_explanation = parts[1].strip()
+                                # Find the first sentence boundary after the title
+                                sentences = title_and_explanation.split('. ')
+                                current_movie = sentences[0].strip()
+                                if len(sentences) > 1:
+                                    current_explanation = ['. '.join(sentences[1:])]
+                                else:
+                                    current_explanation = []
+                        except Exception as e:
+                            print(f"Error parsing movie line: {str(e)}")
+                            continue
+                    
+                    # If we have a current movie, add to its explanation
+                    elif current_movie and line:
+                        current_explanation.append(line)
+                        yield recommendations + [(current_movie, ' '.join(current_explanation))]
         
         # Add last movie
         if current_movie and current_explanation:
@@ -137,48 +159,79 @@ Please provide the reranked list with brief, personalized explanations for why e
     except Exception as e:
         print(f"Error during streaming: {str(e)}")
         # If streaming fails, fall back to non-streaming completion
-        response = client.chat.complete(
-            model="mistral-large-latest",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message}
-            ]
-        )
-        
-        # Process the complete response
-        text = response.choices[0].message.content
-        current_movie = None
-        current_explanation = []
-        recommendations = []
-        
-        for line in text.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-                
-            if any(line.startswith(f"{i}.") for i in range(1, 21)):
-                if current_movie and current_explanation:
-                    recommendations.append((current_movie, ' '.join(current_explanation)))
-                
-                try:
-                    parts = line.split('.', 1)
-                    if len(parts) > 1:
-                        title_and_explanation = parts[1].strip()
-                        sentences = title_and_explanation.split('. ')
-                        current_movie = sentences[0].strip()
-                        if len(sentences) > 1:
-                            current_explanation = ['. '.join(sentences[1:])]
-                        else:
-                            current_explanation = []
-                except Exception as e:
-                    print(f"Error parsing movie line: {str(e)}")
+        try:
+            # Create a non-streaming chain
+            llm = ChatMistralAI(
+                model="mistral-large-latest",
+                mistral_api_key=os.getenv("MISTRAL_API_KEY"),
+                streaming=False,
+                temperature=0.7
+            )
+            
+            chain = (
+                RunnablePassthrough()
+                | {
+                    "system": lambda _: SYSTEM_PROMPT,
+                    "user": lambda x: f"""Please rerank and provide explanations for EXACTLY 20 movies from the following candidates, based on this context:
+
+User's Intention: {x['user_intention']}
+
+Movie History: {x['user_history']}
+
+Preference Weight (α): {x['preference_weight']}
+(0 = focus on history, 1 = focus on stated preferences)
+
+Candidate Movies:
+{chr(10).join(f'- {movie}' for movie in x['candidates'])}
+
+IMPORTANT: You MUST provide EXACTLY 20 recommendations, numbered from 1 to 20. For each movie, start with the number, then the title, then a brief 1-2 sentence explanation of why it's a good match."""
+                }
+                | (lambda x: [SystemMessage(content=x["system"]), HumanMessage(content=x["user"])])
+                | llm
+                | StrOutputParser()
+            )
+            
+            # Get complete response
+            text = chain.invoke(context)
+            
+            # Process the complete response
+            current_movie = None
+            current_explanation = []
+            recommendations = []
+            
+            for line in text.split('\n'):
+                line = line.strip()
+                if not line:
                     continue
-            elif current_movie and line:
-                current_explanation.append(line)
-        
-        if current_movie and current_explanation:
-            recommendations.append((current_movie, ' '.join(current_explanation)))
-        
-        yield recommendations
+                    
+                if any(line.startswith(f"{i}.") for i in range(1, 21)):
+                    if current_movie and current_explanation:
+                        recommendations.append((current_movie, ' '.join(current_explanation)))
+                    
+                    try:
+                        parts = line.split('.', 1)
+                        if len(parts) > 1:
+                            title_and_explanation = parts[1].strip()
+                            sentences = title_and_explanation.split('. ')
+                            current_movie = sentences[0].strip()
+                            if len(sentences) > 1:
+                                current_explanation = ['. '.join(sentences[1:])]
+                            else:
+                                current_explanation = []
+                    except Exception as e:
+                        print(f"Error parsing movie line: {str(e)}")
+                        continue
+                elif current_movie and line:
+                    current_explanation.append(line)
+            
+            if current_movie and current_explanation:
+                recommendations.append((current_movie, ' '.join(current_explanation)))
+            
+            yield recommendations
+            
+        except Exception as e:
+            print(f"Error in fallback mode: {str(e)}")
+            yield []
     
-    return recommendations[:20]  # Ensure we return at most 20 recommendations 
+    # If we somehow got more than 20 recommendations, trim the list
+    return recommendations[:20] 

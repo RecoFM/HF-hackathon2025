@@ -2,7 +2,8 @@ from typing import List, Dict, Any, Optional, Set
 import os
 import pandas as pd
 import numpy as np
-from mistralai import Mistral
+from langchain_mistralai import MistralAIEmbeddings
+from langchain_core.embeddings import Embeddings
 from tqdm import tqdm
 from dotenv import load_dotenv
 import time
@@ -76,7 +77,7 @@ def save_progress(completed_ids: Set[int], config: Config) -> None:
         json.dump(list(completed_ids), f)
 
 def create_embeddings_batch(
-    client: Mistral,
+    embeddings: MistralAIEmbeddings,
     texts: List[str],
     item_ids: List[int],
     completed_ids: Set[int],
@@ -87,7 +88,7 @@ def create_embeddings_batch(
     Create embeddings for a batch of texts with rate limiting
     
     Args:
-        client: Initialized Mistral client
+        embeddings: MistralAIEmbeddings instance
         texts: List of texts to create embeddings for
         item_ids: List of corresponding item IDs
         completed_ids: Set of item IDs that already have embeddings
@@ -98,14 +99,12 @@ def create_embeddings_batch(
         RateLimitError: If rate limit is exceeded
     """
     try:
-        embeddings = client.embeddings.create(
-            model=config.model_name,
-            inputs=texts
-        )
+        # Get embeddings for the batch
+        batch_embeddings = embeddings.embed_documents(texts)
         
         # Store embeddings and update progress
-        for item_id, emb in zip(item_ids, embeddings.data):
-            all_embeddings[item_id] = emb.embedding
+        for item_id, emb in zip(item_ids, batch_embeddings):
+            all_embeddings[item_id] = emb
             completed_ids.add(item_id)
         
         # Save progress after each successful batch
@@ -117,7 +116,7 @@ def create_embeddings_batch(
     except Exception as e:
         if "rate limit" in str(e).lower():
             raise RateLimitError(f"Rate limit exceeded: {str(e)}")
-        raise
+        raise Exception(f"Error creating embeddings: {str(e)}")
 
 def save_embeddings(
     embeddings_dict: Dict[int, List[float]],
@@ -164,8 +163,11 @@ def main() -> None:
     if not api_key:
         raise ValueError("MISTRAL_API_KEY not found in environment variables")
     
-    # Initialize Mistral client
-    client = Mistral(api_key=api_key)
+    # Initialize Mistral embeddings
+    embeddings = MistralAIEmbeddings(
+        model=config.model_name,
+        mistral_api_key=api_key
+    )
     
     # Load item data
     input_path = os.path.join(config.input_dir, config.input_file)
@@ -191,7 +193,7 @@ def main() -> None:
         for i in tqdm(range(0, len(df_remaining), config.batch_size), desc="Creating embeddings"):
             batch_df = df_remaining.iloc[i:i + config.batch_size]
             create_embeddings_batch(
-                client,
+                embeddings,
                 batch_df['title'].tolist(),
                 batch_df['item_id'].tolist(),
                 completed_ids,

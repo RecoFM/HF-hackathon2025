@@ -5,7 +5,8 @@ import pandas as pd
 import os
 import zlib
 from typing import Dict, List, Tuple, Optional, Literal
-from mistralai import Mistral
+from langchain_mistralai import MistralAIEmbeddings
+from langchain_core.embeddings import Embeddings
 import os
 from dotenv import load_dotenv
 from ranking_agent import rank_with_ai
@@ -15,7 +16,10 @@ load_dotenv()
 class MovieRecommender:
     def __init__(self, data_dir: str = "amazon_movies_2023"):
         self.data_dir = data_dir
-        self.mistral_client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
+        self.embeddings = MistralAIEmbeddings(
+            model="mistral-embed",
+            mistral_api_key=os.getenv("MISTRAL_API_KEY")
+        )
         # Load both types of embeddings
         self.load_embeddings()
         
@@ -84,16 +88,14 @@ class MovieRecommender:
         return matches[:20]  # Return top 20 matches
         
     def get_text_embedding(self, text: str) -> np.ndarray:
-        """Get embedding for text using Mistral API"""
+        """Get embedding for text using LangChain Mistral embeddings"""
         try:
-            response = self.mistral_client.embeddings.create(
-                model="mistral-embed",
-                inputs=[text]  # Note: inputs should be a list
-            )
+            embedding = self.embeddings.embed_query(text)
             # Convert embedding to numpy array
-            embedding = np.array(response.data[0].embedding, dtype=np.float32)
+            embedding = np.array(embedding, dtype=np.float32)
             # Normalize the embedding
-            embedding = embedding / np.linalg.norm(embedding)
+            if np.any(embedding):  # Only normalize if not all zeros
+                embedding = embedding / np.linalg.norm(embedding)
             return embedding
         except Exception as e:
             print(f"Error getting embedding from Mistral API: {str(e)}")
@@ -143,7 +145,8 @@ class MovieRecommender:
                 # Calculate history embedding (average of selected movies)
                 history_embedding = np.mean(selected_embeddings, axis=0)
                 # Normalize history embedding
-                history_embedding = history_embedding / np.linalg.norm(history_embedding)
+                if np.any(history_embedding):  # Only normalize if not all zeros
+                    history_embedding = history_embedding / np.linalg.norm(history_embedding)
         
         # Get preference-based embedding if we have user preferences
         if user_preferences:
@@ -167,7 +170,8 @@ class MovieRecommender:
             return []
         
         # Normalize final user embedding
-        user_embedding = user_embedding / np.linalg.norm(user_embedding)
+        if np.any(user_embedding):  # Only normalize if not all zeros
+            user_embedding = user_embedding / np.linalg.norm(user_embedding)
         
         # Calculate cosine similarity with all movies
         similarities = np.dot(embeddings, user_embedding)
@@ -180,27 +184,28 @@ class MovieRecommender:
         for idx in idx_sorted:
             if idx not in selected_indices:
                 recommendation_indices.append(idx)
-                if len(recommendation_indices) == n_recommendations:
+                if len(recommendation_indices) == n_recommendations * 2:  # Get more candidates for ranking
                     break
         
         # Get recommended movie titles
         item_ids = self.gcl_item_ids if embedding_type == "LLM + GCL" else self.llm_item_ids
         recommended_ids = item_ids[recommendation_indices]
-        recommended_movies = self.movies_df[self.movies_df['item_id'].isin(recommended_ids)]
         
-        if len(recommended_movies) == 0:
-            print("Warning: No matching movies found in the movies database")
-            return []
+        # Create a mapping of movie_id to similarity score
+        id_to_score = {str(movie_id): float(score) for movie_id, score in zip(recommended_ids, similarities[recommendation_indices])}
         
-        # Sort recommendations by similarity score
-        similarity_scores = similarities[recommendation_indices]
+        # Get titles for valid movie IDs
         recommendations_with_scores = []
-        for movie_id, score in zip(recommended_ids, similarity_scores):
-            movie_title = self.movies_df[self.movies_df['item_id'] == movie_id]['title'].iloc[0]
-            recommendations_with_scores.append((movie_title, score))
+        for movie_id in recommended_ids:
+            movie_data = self.movies_df[self.movies_df['item_id'] == str(movie_id)]
+            if not movie_data.empty:
+                title = movie_data['title'].iloc[0]
+                score = id_to_score[str(movie_id)]
+                recommendations_with_scores.append((title, score))
         
+        # Sort by similarity score and take top n
         recommendations_with_scores.sort(key=lambda x: x[1], reverse=True)
-        return [(title, float(score)) for title, score in recommendations_with_scores]
+        return recommendations_with_scores[:n_recommendations]
 
 def create_interface():
     try:
