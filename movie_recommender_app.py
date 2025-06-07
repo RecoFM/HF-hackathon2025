@@ -53,7 +53,7 @@ class MovieRecommender:
             )
         
         # Load movie mapping
-        mapping_path = os.path.join(self.data_dir, "title_embeddings_mapping.csv")
+        mapping_path = os.path.join(self.data_dir, "title_embeddings_mapping_cleaned.csv")
         self.movies_df = pd.read_csv(mapping_path)
         self.movies_df['item_id'] = self.movies_df['item_id'].astype(str)  # Ensure string type
         
@@ -79,13 +79,13 @@ class MovieRecommender:
     def search_movies(self, query: str) -> List[str]:
         if not query:
             return []
-        # Case-insensitive search
         query = query.lower()
-        matches = [
-            title for title in self.all_titles
-            if query in title.lower()
-        ]
-        return matches[:20]  # Return top 20 matches
+        matches = []
+        for title in self.all_titles:
+            t = str(title)
+            if query in t.lower():
+                matches.append(t)
+        return matches[:20]
         
     def get_text_embedding(self, text: str) -> np.ndarray:
         """Get embedding for text using LangChain Mistral embeddings"""
