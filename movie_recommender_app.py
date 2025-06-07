@@ -234,12 +234,26 @@ def create_interface():
         with gr.Row():
             with gr.Column():
                 # Movie search and selection
-                movie_search = gr.Dropdown(
-                    choices=[],
-                    label="Search and select movies you've enjoyed",
+                movie_search_input = gr.Textbox(
+                    label="Search movies",
+                    placeholder="Type to search...",
                     interactive=True,
-                    allow_custom_value=True
+                    every=True
                 )
+                
+                # Show search results as a list of clickable buttons
+                search_results = gr.Radio(
+                    choices=[],
+                    label="Search Results",
+                    interactive=True,
+                    visible=True
+                )
+                
+                # # Selected movies display
+                # selected_display = gr.Markdown(
+                #     label="Your Selected Movies",
+                #     value="No movies selected yet"
+                # )
                 
                 # Display selected movies with delete buttons
                 with gr.Column(elem_id="selected_movies_container") as selected_movies_container:
@@ -292,11 +306,17 @@ def create_interface():
                     value="Recommendations will appear here"
                 )
         
-        def update_search_options(query):
+        def update_search_options(query, current_movies):
             if not query:
-                return gr.Dropdown(choices=[])
+                return gr.Radio(choices=[])
             matches = recommender.search_movies(query)
-            return gr.Dropdown(choices=matches)
+            # Add "(Selected)" to movies that are already in the selection
+            current_movies = current_movies or []
+            matches_with_status = [
+                f"{match} {'(Selected)' if match in current_movies else ''}"
+                for match in matches
+            ]
+            return gr.Radio(choices=matches_with_status)
         
         def delete_movie(btn_idx, current_movies):
             if not current_movies or btn_idx >= len(current_movies):
@@ -328,7 +348,10 @@ def create_interface():
                     format_selected_movies_with_buttons(current_movies),
                     *[i < len(current_movies) for i in range(5)]
                 )
-                
+            
+            # Remove "(Selected)" suffix if present
+            movie = movie.replace(" (Selected)", "")
+            
             current_movies = current_movies or []
             if len(current_movies) >= 5:
                 return (
@@ -388,15 +411,15 @@ def create_interface():
                 yield result
         
         # Event handlers
-        movie_search.change(
+        movie_search_input.input(
             fn=update_search_options,
-            inputs=movie_search,
-            outputs=movie_search
+            inputs=[movie_search_input, selected_movies],
+            outputs=search_results
         )
         
-        movie_search.select(
+        search_results.select(
             fn=add_movie,
-            inputs=[movie_search, selected_movies],
+            inputs=[search_results, selected_movies],
             outputs=[selected_movies, selected_display] + delete_buttons
         )
         
