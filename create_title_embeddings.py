@@ -3,7 +3,6 @@ import os
 import pandas as pd
 import numpy as np
 from langchain_mistralai import MistralAIEmbeddings
-from langchain_core.embeddings import Embeddings
 from tqdm import tqdm
 from dotenv import load_dotenv
 import time

@@ -4,6 +4,7 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 from sklearn.preprocessing import normalize
 import os
+import pandas as pd
 
 class GCLProcessor:
     def __init__(self, data_dir: str = "amazon_movies_2023", n_layers: int = 1) -> None:
@@ -35,7 +36,6 @@ class GCLProcessor:
         
         # Load matrix item mapping
         mapping_path: str = os.path.join(self.data_dir, "item_id_mapping.csv")
-        import pandas as pd
         item_mapping_df = pd.read_csv(mapping_path)
         self.matrix_item_mapping = dict(zip(item_mapping_df['item_id'].astype(str), item_mapping_df.index))
         

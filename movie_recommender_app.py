@@ -10,6 +10,10 @@ from langchain_core.embeddings import Embeddings
 import os
 from dotenv import load_dotenv
 from ranking_agent import rank_with_ai
+from scipy.sparse import load_npz
+from rapidfuzz import process, fuzz
+import re
+from sklearn.metrics.pairwise import cosine_similarity
 
 load_dotenv()
 
@@ -76,16 +80,32 @@ class MovieRecommender:
         print(f"Number of titles with LLM embeddings: {len(set(self.llm_id_to_idx.keys()) & set(self.title_to_id.values()))}")
         print(f"Number of titles with GCL embeddings: {len(set(self.gcl_id_to_idx.keys()) & set(self.title_to_id.values()))}")
         
+        # Pre-process titles for fuzzy matching
+        self.clean_titles = {self.clean_title_for_comparison(title): title for title in self.title_to_id.keys()}
+        
+    def clean_title_for_comparison(self, title):
+        """Clean title for comparison purposes"""
+        # Remove special characters and extra spaces
+        title = re.sub(r'[^\w\s]', '', str(title))
+        # Convert to lowercase and strip
+        return ' '.join(title.lower().split())
+
     def search_movies(self, query: str) -> List[str]:
         if not query:
-            return []
-        # Case-insensitive search
-        query = query.lower()
-        matches = [
-            title for title in self.all_titles
-            if query in title.lower()
-        ]
-        return matches[:20]  # Return top 20 matches
+            return []  # Return empty if no query to avoid overwhelming UI
+        
+        clean_query = self.clean_title_for_comparison(query)
+        # Use rapidfuzz to find matches across entire dataset
+        matches = process.extract(
+            clean_query,
+            self.clean_titles.keys(),
+            scorer=fuzz.WRatio,  # WRatio works well for movie titles
+            limit=None,  # No limit - show all matches
+            score_cutoff=60  # Only return matches with score > 60
+        )
+        
+        # Convert matches back to original titles
+        return [self.clean_titles[match[0]] for match in matches]
         
     def get_text_embedding(self, text: str) -> np.ndarray:
         """Get embedding for text using LangChain Mistral embeddings"""
@@ -101,111 +121,139 @@ class MovieRecommender:
             print(f"Error getting embedding from Mistral API: {str(e)}")
             return None
         
-    def get_recommendations(
-        self, 
-        selected_titles: List[str], 
-        embedding_type: Literal["LLM", "LLM + GCL"] = "LLM",
-        user_preferences: str = "",
-        alpha: float = 0.5,
-        n_recommendations: int = 20
-    ) -> List[Tuple[str, float]]:
-        if not selected_titles and not user_preferences:
-            return []
-            
-        # Filter out any invalid titles
-        selected_titles = [title for title in selected_titles if title in self.title_to_id]
-        
+    def get_recommendations(self, selected_movies: List[str], embedding_type: str = "LLM + GCL", user_preferences: str = "", alpha: float = 0.5) -> str:
+        """
+        Get recommendations using proper embedding aggregation:
+        - e_h: embedding from user history (selected movies)
+        - e_u: embedding from user preferences (text)
+        - Combined: alpha * e_u + (1-alpha) * e_h
+        """
+        if not selected_movies and not user_preferences:
+            return "Please select some movies or provide preferences."
+
         # Choose embeddings based on type
-        embeddings = self.gcl_embeddings if embedding_type == "LLM + GCL" else self.llm_embeddings
-        id_to_idx = self.gcl_id_to_idx if embedding_type == "LLM + GCL" else self.llm_id_to_idx
-        
-        # Initialize user embedding components
-        history_embedding = None
-        preference_embedding = None
-            
-        # Get history-based embedding if we have selected titles
-        if selected_titles:
-            # Get indices of selected movies
-            selected_indices = []
-            missing_titles = []
-            for title in selected_titles:
-                item_id = str(self.title_to_id[title])
-                if item_id in id_to_idx:
-                    selected_indices.append(id_to_idx[item_id])
-                else:
-                    missing_titles.append(title)
-                    print(f"Warning: Movie '{title}' (ID: {item_id}) not found in {embedding_type} embeddings")
-            
-            if missing_titles:
-                print(f"Movies not found in {embedding_type} embeddings: {', '.join(missing_titles)}")
-            
-            if selected_indices:
-                # Get embeddings of selected movies
-                selected_embeddings = embeddings[selected_indices]
-                # Calculate history embedding (average of selected movies)
-                history_embedding = np.mean(selected_embeddings, axis=0)
-                # Normalize history embedding
-                if np.any(history_embedding):  # Only normalize if not all zeros
-                    history_embedding = history_embedding / np.linalg.norm(history_embedding)
-        
-        # Get preference-based embedding if we have user preferences
-        if user_preferences:
-            preference_embedding = self.get_text_embedding(user_preferences)
-            if preference_embedding is None:
-                print("Warning: Failed to get embedding for user preferences")
-                if history_embedding is None:
-                    return []
-        
-        # Combine embeddings based on availability and alpha
-        if history_embedding is not None and preference_embedding is not None:
-            # Both available - use alpha for weighted combination
-            user_embedding = alpha * preference_embedding + (1 - alpha) * history_embedding
-        elif history_embedding is not None:
-            # Only history available
-            user_embedding = history_embedding
-        elif preference_embedding is not None:
-            # Only preferences available
-            user_embedding = preference_embedding
+        if embedding_type == "LLM + GCL":
+            embeddings = self.gcl_embeddings
+            id_to_idx = self.gcl_id_to_idx
         else:
-            return []
+            embeddings = self.llm_embeddings
+            id_to_idx = self.llm_id_to_idx
+
+        user_profile = None
         
-        # Normalize final user embedding
-        if np.any(user_embedding):  # Only normalize if not all zeros
-            user_embedding = user_embedding / np.linalg.norm(user_embedding)
+        # Get embedding from user history (e_h)
+        e_h = None
+        if selected_movies:
+            movie_ids = [self.title_to_id[title] for title in selected_movies if title in self.title_to_id]
+            if movie_ids:
+                selected_embeddings = []
+                for movie_id in movie_ids:
+                    if movie_id in id_to_idx:
+                        idx = id_to_idx[movie_id]
+                        selected_embeddings.append(embeddings[idx])
+                
+                if selected_embeddings:
+                    e_h = np.mean(selected_embeddings, axis=0)
         
-        # Calculate cosine similarity with all movies
-        similarities = np.dot(embeddings, user_embedding)
+        # Get embedding from user preferences (e_u)
+        e_u = None
+        if user_preferences.strip():
+            e_u = self.get_text_embedding(user_preferences)
         
-        # Get indices of most similar movies (excluding selected ones)
-        recommendation_indices = []
-        idx_sorted = np.argsort(-similarities)
+        # Apply aggregation algorithm
+        if e_h is not None and e_u is not None:
+            # Both available: alpha * e_u + (1-alpha) * e_h
+            user_profile = alpha * e_u + (1 - alpha) * e_h
+            print(f"Using combined embedding: α={alpha} (preferences weight)")
+        elif e_u is not None:
+            # Only preferences available
+            user_profile = e_u
+            print("Using preferences-only embedding")
+        elif e_h is not None:
+            # Only history available
+            user_profile = e_h
+            print("Using history-only embedding")
+        else:
+            return "Could not create user profile from provided input."
         
-        selected_indices = selected_indices if 'selected_indices' in locals() else []
-        for idx in idx_sorted:
-            if idx not in selected_indices:
-                recommendation_indices.append(idx)
-                if len(recommendation_indices) == n_recommendations * 2:  # Get more candidates for ranking
+        # Calculate similarity with all movies
+        # Normalize user profile and embeddings for proper cosine similarity
+        user_profile_norm = user_profile / np.linalg.norm(user_profile)
+        embeddings_norm = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+        
+        # Calculate cosine similarity (normalized dot product)
+        similarities = np.dot(embeddings_norm, user_profile_norm)
+        
+        print(f"Similarity range: {similarities.min():.3f} to {similarities.max():.3f}")
+        
+        # Get top 100 most similar movies
+        top_indices = np.argsort(similarities)[-100:][::-1]
+        
+        # Filter out selected movies and create recommendations
+        seen_titles = set(selected_movies) if selected_movies else set()
+        seen_clean_titles = set(self.clean_title_for_comparison(title) for title in seen_titles)
+        final_recommendations = []
+        
+        # Get reverse mapping for the chosen embedding type
+        if embedding_type == "LLM + GCL":
+            idx_to_id = {idx: item_id for item_id, idx in self.gcl_id_to_idx.items()}
+        else:
+            idx_to_id = {idx: item_id for item_id, idx in self.llm_id_to_idx.items()}
+        
+        for idx in top_indices:
+            if idx not in idx_to_id:
+                continue
+                
+            item_id = idx_to_id[idx]
+            
+            # Find the title for this item_id
+            title = None
+            for t, id_ in self.title_to_id.items():
+                if id_ == item_id:
+                    title = t
                     break
+            
+            if not title:
+                continue
+                
+            clean_title = self.clean_title_for_comparison(title)
+            
+            # Skip if exact title is in seen titles
+            if title in seen_titles:
+                continue
+                
+            # Skip if clean version of title is in seen titles
+            if clean_title in seen_clean_titles:
+                continue
+                
+            # Skip collections/trilogies if user has seen any part
+            is_collection = False
+            for seen_title in seen_titles:
+                seen_clean = self.clean_title_for_comparison(seen_title)
+                if seen_clean in clean_title or clean_title in seen_clean:
+                    if any(marker in title.lower() for marker in ['collection', 'trilogy', 'series', 'complete']):
+                        is_collection = True
+                        break
+            if is_collection:
+                continue
+            
+            # Check if this is a duplicate of already recommended movie
+            is_duplicate = any(
+                fuzz.ratio(clean_title, self.clean_title_for_comparison(rec[0])) > 90
+                for rec in final_recommendations
+            )
+            if is_duplicate:
+                continue
+                
+            # Add with similarity score
+            final_recommendations.append((title, similarities[idx]))
+            if len(final_recommendations) >= 100:
+                break
         
-        # Get recommended movie titles
-        item_ids = self.gcl_item_ids if embedding_type == "LLM + GCL" else self.llm_item_ids
-        recommended_ids = item_ids[recommendation_indices]
+        if not final_recommendations:
+            return "No recommendations found based on your input."
         
-        # Create a mapping of movie_id to similarity score
-        id_to_score = {str(movie_id): float(score) for movie_id, score in zip(recommended_ids, similarities[recommendation_indices])}
-        
-        # Get titles for valid movie IDs
-        recommendations_with_scores = []
-        for movie_id in recommended_ids:
-            movie_data = self.movies_df[self.movies_df['item_id'] == str(movie_id)]
-            if not movie_data.empty:
-                title = movie_data['title'].iloc[0]
-                score = id_to_score[str(movie_id)]
-                recommendations_with_scores.append((title, score))
-        
-        # Sort by similarity score and take top n
-        recommendations_with_scores.sort(key=lambda x: x[1], reverse=True)
-        return recommendations_with_scores[:n_recommendations]
+        return final_recommendations[:100]  # Return top 100 for ranking agent
 
 def create_interface():
     try:
@@ -233,26 +281,32 @@ def create_interface():
         
         with gr.Row():
             with gr.Column():
-                # Movie search and selection
+                # ONE single field that does everything
                 movie_search = gr.Dropdown(
                     choices=[],
-                    label="Search and select movies you've enjoyed",
+                    label="Search for movies you've enjoyed",
+                    info="Start typing for instant movie suggestions",
                     interactive=True,
-                    allow_custom_value=True
+                    allow_custom_value=True,
+                    filterable=True,
+                    every=0.3  # Update every 0.3 seconds while typing
                 )
                 
-                # Display selected movies with delete buttons
+                # Display selected movies with functional red cross buttons
                 with gr.Column(elem_id="selected_movies_container") as selected_movies_container:
-                    selected_display = gr.Markdown(
+                    selected_display = gr.HTML(
                         label="Your Selected Movies",
-                        value="No movies selected yet"
+                        value="<p><i>No movies selected yet</i></p>"
                     )
-                    with gr.Row() as delete_row:
-                        delete_buttons = []
-                        for i in range(5):  # Maximum 5 movies
-                            delete_buttons.append(
-                                gr.Button("🗑️ Delete Movie " + str(i+1), visible=False, size="sm", min_width=100)
-                            )
+                    
+                    # Individual delete buttons (simpler approach)
+                    delete_buttons = []
+                    for i in range(5):  # Maximum 5 movies
+                        btn = gr.Button(f"× Remove Movie {i+1}", visible=False, size="sm", variant="secondary")
+                        delete_buttons.append(btn)
+                    
+                    # Clear all button
+                    clear_btn = gr.Button("Clear All", size="sm", variant="secondary")
                 
                 # User preferences text field
                 user_preferences = gr.Textbox(
@@ -279,9 +333,6 @@ def create_interface():
                     info="Choose between pure language model embeddings (LLM) or graph-enhanced embeddings (LLM + GCL)"
                 )
                 
-                # Clear selection button
-                clear_btn = gr.Button("Clear Selection")
-                
                 # Get recommendations button
                 recommend_btn = gr.Button("Get Recommendations", variant="primary")
             
@@ -293,100 +344,143 @@ def create_interface():
                 )
         
         def update_search_options(query):
-            if not query:
+            """Update search results based on input - auto-suggestions in the same field"""
+            if not query or len(query.strip()) < 2:
                 return gr.Dropdown(choices=[])
-            matches = recommender.search_movies(query)
-            return gr.Dropdown(choices=matches)
-        
-        def delete_movie(btn_idx, current_movies):
-            if not current_movies or btn_idx >= len(current_movies):
-                button_visibility = [False] * 5
-                return (
-                    current_movies, 
-                    format_selected_movies_with_buttons(current_movies),
-                    *button_visibility  # Unpack the list of button visibilities
-                )
             
-            current_movies.pop(btn_idx)
-            button_visibility = [i < len(current_movies) for i in range(5)]
-            return (
-                current_movies, 
-                format_selected_movies_with_buttons(current_movies),
-                *button_visibility  # Unpack the list of button visibilities
-            )
+            # Check if it's a movie search (shorter phrases) or description (longer text)
+            words = query.strip().split()
+            if len(words) <= 3:
+                # Treat as movie search - show suggestions in the same dropdown
+                matches = recommender.search_movies(query)
+                # Limit display to first 100 for UI performance
+                display_matches = matches[:100] if len(matches) > 100 else matches
+                return gr.Dropdown(choices=display_matches)
+            else:
+                # Treat as description - don't show suggestions, keep current value
+                return gr.Dropdown(choices=[], value=query)
         
-        def format_selected_movies_with_buttons(movies):
+        def format_selected_movies_display(movies):
+            """Format selected movies with remove buttons on same line"""
             if not movies:
-                return "No movies selected yet"
-            # Format each movie with a number
-            return "\n".join(f"{i+1}. {movie}" for i, movie in enumerate(movies))
-        
-        def add_movie(movie, current_movies):
-            if not movie:
-                return (
-                    current_movies, 
-                    format_selected_movies_with_buttons(current_movies),
-                    *[i < len(current_movies) for i in range(5)]
-                )
-                
-            current_movies = current_movies or []
-            if len(current_movies) >= 5:
-                return (
-                    current_movies, 
-                    format_selected_movies_with_buttons(current_movies),
-                    *[i < len(current_movies) for i in range(5)]
-                )
-                
-            if movie not in current_movies:
-                current_movies.append(movie)
+                return "<p><i>No movies selected yet</i></p>"
             
-            # Update button visibility
-            button_visibility = [i < len(current_movies) for i in range(5)]
+            html_items = []
+            for i, movie in enumerate(movies):
+                html_items.append(f"""
+                    <div style="display: flex; align-items: center; justify-content: space-between; 
+                                padding: 8px 12px; margin: 4px 0; background-color: #f8f9fa; 
+                                border-radius: 6px; border-left: 3px solid #007bff;">
+                        <span style="flex-grow: 1; font-size: 14px; margin-right: 10px;">{i+1}. {movie}</span>
+                    </div>
+                """)
             
-            return (
-                current_movies, 
-                format_selected_movies_with_buttons(current_movies),
-                *button_visibility
-            )
-        
-        def clear_selection(current_movies):
-            button_visibility = [False] * 5
-            return [], "No movies selected yet", *button_visibility
-        
+            return f"<div>{''.join(html_items)}</div>"
+
+        def update_delete_buttons_visibility(movies):
+            """Update visibility and labels of delete buttons"""
+            button_updates = []
+            for i in range(5):
+                if i < len(movies):
+                    movie_name = movies[i][:40] + ("..." if len(movies[i]) > 40 else "")
+                    button_updates.append(gr.Button(f"🗑️ {movie_name}", visible=True, size="sm", variant="secondary"))
+                else:
+                    button_updates.append(gr.Button(f"× Remove Movie {i+1}", visible=False, size="sm", variant="secondary"))
+            
+            return button_updates
+
+        def delete_movie_by_index(index, current_movies):
+            """Delete movie at specific index"""
+            if not current_movies or index >= len(current_movies):
+                return current_movies, format_selected_movies_display(current_movies)
+            
+            current_movies.pop(index)
+            return current_movies, format_selected_movies_display(current_movies)
+
+        def handle_selection(selected_value, current_movies):
+            """Handle movie selection from ONE field"""
+            if not selected_value:
+                return [current_movies, format_selected_movies_display(current_movies)] + update_delete_buttons_visibility(current_movies)
+            
+            # Check if it's a movie title (exists in our database)
+            if selected_value in recommender.title_to_id:
+                # It's a movie selection - add it to the list
+                current_movies = current_movies or []
+                if len(current_movies) >= 5:
+                    return [current_movies, format_selected_movies_display(current_movies)] + update_delete_buttons_visibility(current_movies)
+                    
+                if selected_value not in current_movies:
+                    current_movies.append(selected_value)
+                
+                return [current_movies, format_selected_movies_display(current_movies)] + update_delete_buttons_visibility(current_movies)
+            else:
+                # Not a movie from database
+                return [current_movies, format_selected_movies_display(current_movies)] + update_delete_buttons_visibility(current_movies)
+
+        def clear_all_movies():
+            """Clear all selected movies"""
+            empty_movies = []
+            return [empty_movies, "<p><i>No movies selected yet</i></p>"] + update_delete_buttons_visibility(empty_movies)
+
         def get_recommendations(movies, emb_type, preferences, pref_weight):
+            """Get recommendations: retrieval phase only, then delegate to ranking_agent with streaming"""
             if not movies and not preferences:
-                return "Please select some movies or provide preferences"
+                yield "Please select some movies or provide preferences"
+                return
+            
+            try:
+                # RETRIEVAL PHASE: Get top 100 candidates using proper embedding aggregation
+                print(f"\n=== RETRIEVAL PHASE ===")
+                print(f"Selected movies: {movies}")
+                print(f"User preferences: '{preferences}'")
+                print(f"Alpha weight: {pref_weight}")
+                print(f"Embedding type: {emb_type}")
                 
-            # First get retrieval recommendations
-            retrieval_results = recommender.get_recommendations(
-                movies, 
-                emb_type,
-                user_preferences=preferences,
-                alpha=pref_weight
-            )
-            
-            if not retrieval_results:
-                return "No recommendations available yet"
-            
-            # Prepare context for AI ranking
-            context = {
-                "user_intention": preferences if preferences else "No specific preferences provided",
-                "user_history": movies if movies else "No movie history provided",
-                "preference_weight": pref_weight,
-                "candidates": [title for title, _ in retrieval_results]
-            }
-            
-            # Get AI ranking and explanations with streaming
-            result = "## Your Personalized Recommendations\n\n"
-            yield result + "Analyzing your preferences..."
-            
-            for ranked_results in rank_with_ai(context):
-                result = "## Your Personalized Recommendations\n\n"
-                for i, (title, explanation) in enumerate(ranked_results, 1):
-                    result += f"### {i}. {title}\n"
-                    result += f"{explanation}\n\n"
-                yield result
-        
+                yield "🔍 Searching for similar movies..."
+                
+                recommendations = recommender.get_recommendations(
+                    selected_movies=movies, 
+                    embedding_type=emb_type,
+                    user_preferences=preferences,
+                    alpha=pref_weight
+                )
+                
+                # Handle error cases
+                if isinstance(recommendations, str):
+                    yield recommendations
+                    return
+                
+                # Print retrieval results
+                print(f"\nRETRIEVAL RESULTS: Found {len(recommendations)} candidates")
+                print("Top 10 from retrieval phase:")
+                for i, (title, score) in enumerate(recommendations[:10], 1):
+                    print(f"  {i:2d}. {title} (score: {score:.3f})")
+                
+                # RERANKING + EXPLANATION PHASE: Delegate to ranking_agent with streaming
+                print(f"\n=== RERANKING PHASE ===")
+                print(f"Calling rank_with_ai with:")
+                print(f"  - {len(recommendations)} recommendations")
+                print(f"  - preferences: '{preferences}'")
+                print(f"  - alpha: {pref_weight}")
+                print(f"  - user_movies: {movies}")
+                
+                yield "🤖 AI is ranking and explaining your recommendations..."
+                
+                # Stream the responses from ranking agent
+                for partial_result in rank_with_ai(
+                    recommendations=recommendations, 
+                    user_preferences=preferences, 
+                    alpha=pref_weight,
+                    user_movies=movies
+                ):
+                    yield partial_result
+                    
+            except Exception as e:
+                print(f"ERROR in get_recommendations: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                yield f"Error getting recommendations: {str(e)}"
+
         # Event handlers
         movie_search.change(
             fn=update_search_options,
@@ -395,24 +489,30 @@ def create_interface():
         )
         
         movie_search.select(
-            fn=add_movie,
+            fn=handle_selection,
             inputs=[movie_search, selected_movies],
             outputs=[selected_movies, selected_display] + delete_buttons
         )
         
-        clear_btn.click(
-            fn=clear_selection,
-            inputs=[selected_movies],
-            outputs=[selected_movies, selected_display] + delete_buttons
-        )
-        
-        # Add delete button handlers
+        # Add individual delete button handlers
         for i, btn in enumerate(delete_buttons):
+            def make_delete_handler(btn_idx):
+                def delete_handler(current_movies):
+                    updated_movies, updated_display = delete_movie_by_index(btn_idx, current_movies)
+                    return [updated_movies, updated_display] + update_delete_buttons_visibility(updated_movies)
+                return delete_handler
+            
             btn.click(
-                fn=delete_movie,
-                inputs=[gr.Number(value=i, visible=False), selected_movies],
+                fn=make_delete_handler(i),
+                inputs=[selected_movies],
                 outputs=[selected_movies, selected_display] + delete_buttons
             )
+        
+        clear_btn.click(
+            fn=clear_all_movies,
+            inputs=[],
+            outputs=[selected_movies, selected_display] + delete_buttons
+        )
         
         recommend_btn.click(
             fn=get_recommendations,

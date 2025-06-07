@@ -1,10 +1,11 @@
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Set
 from datasets import load_dataset, Dataset
 import pandas as pd
 from scipy.sparse import csr_matrix, save_npz
 import numpy as np
 import os
 from dataclasses import dataclass, field
+import re
 
 @dataclass
 class Config:
@@ -43,9 +44,33 @@ def load_datasets(config: Config) -> Tuple[Dataset, Dataset]:
     )
     return reviews, metadata
 
+def clean_movie_title(title: str) -> str:
+    """
+    Clean movie title by removing format information and standardizing
+    
+    Args:
+        title: Raw movie title
+        
+    Returns:
+        Cleaned title
+    """
+    if pd.isna(title):
+        return title
+        
+    # Remove anything in brackets
+    title = re.sub(r"\[.*?\]|\(.*?\)", "", title)
+    # Remove format indicators
+    title = re.sub(r"\b(DVD|Blu[- ]?Ray|VHS|[0-9]{3,4}p|4K|UHD)\b", "", title, flags=re.IGNORECASE)
+    # Remove file extensions
+    title = re.sub(r"\.(avi|mkv|mp4|mov)$", "", title, flags=re.IGNORECASE)
+    # Remove collection indicators
+    title = re.sub(r"\b(Collection|Collector)\b", "", title, flags=re.IGNORECASE)
+    # Clean up whitespace
+    return re.sub(r"\s+", " ", title).strip()
+
 def process_metadata(df_meta: pd.DataFrame, config: Config) -> pd.DataFrame:
     """
-    Process metadata DataFrame and filter out items with empty titles
+    Process metadata DataFrame and clean titles
     
     Args:
         df_meta: Raw metadata DataFrame
@@ -58,16 +83,31 @@ def process_metadata(df_meta: pd.DataFrame, config: Config) -> pd.DataFrame:
     initial_items = len(df_meta)
     
     # Remove items with missing titles
+    print("Checking for missing titles...")
     missing_titles = df_meta['title'].isna().sum()
-    df_meta = df_meta[config.required_meta_columns].dropna()
+    df_meta = df_meta[~df_meta['title'].isna()]
     
     # Remove items with empty or whitespace-only titles
+    print("Removing empty titles...")
     df_meta['title'] = df_meta['title'].str.strip()
     empty_titles = (df_meta['title'] == '').sum()
     df_meta = df_meta[df_meta['title'] != '']
     
-    # Remove duplicates
-    df_meta = df_meta.drop_duplicates(subset=["parent_asin"])
+    # Clean titles
+    print("\nCleaning movie titles...")
+    df_meta['clean_title'] = df_meta['title'].apply(clean_movie_title)
+    
+    # Keep the first occurrence of each cleaned title
+    print("Removing duplicate titles...")
+    df_meta = df_meta.drop_duplicates(subset=['clean_title'], keep='first')
+    
+    # Update titles to cleaned versions
+    print("Updating titles...")
+    df_meta['title'] = df_meta['clean_title']
+    df_meta = df_meta.drop(columns=['clean_title'])
+    
+    # Keep only required columns
+    df_meta = df_meta[config.required_meta_columns]
     
     # Print statistics
     total_removed = initial_items - len(df_meta)
@@ -82,7 +122,7 @@ def process_metadata(df_meta: pd.DataFrame, config: Config) -> pd.DataFrame:
 
 def process_reviews(df_reviews: pd.DataFrame, df_meta: pd.DataFrame, config: Config) -> pd.DataFrame:
     """
-    Process reviews DataFrame and filter items with few interactions
+    Process reviews DataFrame and filter items
     
     Args:
         df_reviews: Raw reviews DataFrame
@@ -98,10 +138,14 @@ def process_reviews(df_reviews: pd.DataFrame, df_meta: pd.DataFrame, config: Con
     
     # Basic filtering
     df_reviews = df_reviews[config.required_review_columns].dropna()
-    df_reviews = df_reviews.drop_duplicates(subset=["user_id", "parent_asin"])
-    df_reviews["rating"] = df_reviews["rating"].astype(float)
     
-    # Keep only reviews for items that have titles
+    # Convert to binary interactions
+    df_reviews['rating'] = 1
+    
+    # Remove duplicate user-item interactions
+    df_reviews = df_reviews.drop_duplicates(subset=["user_id", "parent_asin"])
+    
+    # Keep only reviews for items that have valid titles
     items_with_titles = set(df_meta['parent_asin'])
     df_reviews = df_reviews[df_reviews['parent_asin'].isin(items_with_titles)]
     
@@ -252,6 +296,14 @@ def main() -> None:
     print(df_reviews.columns.tolist())
     print("\nMetadata columns:")
     print(df_meta.columns.tolist())
+    
+    # Print parent_asin statistics
+    print("\nParent ASIN statistics:")
+    total_reviews = len(df_reviews)
+    unique_parent_asins = df_reviews['parent_asin'].nunique()
+    print(f"Total reviews: {total_reviews:,}")
+    print(f"Unique parent ASINs: {unique_parent_asins:,}")
+    print(f"Average reviews per parent ASIN: {total_reviews/unique_parent_asins:.1f}")
 
     # Process metadata first to get valid items
     df_meta = process_metadata(df_meta, config)
