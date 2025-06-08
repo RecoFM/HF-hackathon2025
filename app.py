@@ -269,7 +269,7 @@ def create_interface():
         Get personalized movie recommendations based on your taste and preferences!
         
         **How to use:**
-        1. Search and select up to 5 movies you've enjoyed
+        1. Search and select movies you've enjoyed (no limit!)
         2. Describe what kind of movie you're looking for (optional)
         3. Adjust the preference weight (α) to balance between your description and movie history
         4. Get personalized recommendations
@@ -281,15 +281,20 @@ def create_interface():
         
         with gr.Row():
             with gr.Column():
-                # ONE single field that does everything
-                movie_search = gr.Dropdown(
-                    choices=[],
-                    label="Search for movies you've enjoyed",
-                    info="Start typing for instant movie suggestions",
+                # Movie search and selection
+                movie_search_input = gr.Textbox(
+                    label="Search movies",
+                    placeholder="Type to search...",
                     interactive=True,
-                    allow_custom_value=True,
-                    filterable=True,
-                    every=0.3  # Update every 0.3 seconds while typing
+                    every=True
+                )
+                
+                # Show search results as a list of clickable buttons
+                search_results = gr.Radio(
+                    choices=[],
+                    label="Search Results",
+                    interactive=True,
+                    visible=True
                 )
                 
                 # Display selected movies with functional red cross buttons
@@ -299,9 +304,9 @@ def create_interface():
                         value="<p><i>No movies selected yet</i></p>"
                     )
                     
-                    # Individual delete buttons (simpler approach)
+                    # Individual delete buttons (simpler approach)  
                     delete_buttons = []
-                    for i in range(5):  # Maximum 5 movies
+                    for i in range(20):  # Support up to 20 movies
                         btn = gr.Button(f"× Remove Movie {i+1}", visible=False, size="sm", variant="secondary")
                         delete_buttons.append(btn)
                     
@@ -343,22 +348,19 @@ def create_interface():
                     value="Recommendations will appear here"
                 )
         
-        def update_search_options(query):
-            """Update search results based on input - auto-suggestions in the same field"""
+        def update_search_results(query):
+            """Update search results based on input"""
             if not query or len(query.strip()) < 2:
-                return gr.Dropdown(choices=[])
+                return gr.Radio(choices=[], visible=False)
             
-            # Check if it's a movie search (shorter phrases) or description (longer text)
-            words = query.strip().split()
-            if len(words) <= 3:
-                # Treat as movie search - show suggestions in the same dropdown
-                matches = recommender.search_movies(query)
-                # Limit display to first 100 for UI performance
-                display_matches = matches[:100] if len(matches) > 100 else matches
-                return gr.Dropdown(choices=display_matches)
+            matches = recommender.search_movies(query)
+            # Limit display to first 20 for UI performance
+            display_matches = matches[:20] if len(matches) > 20 else matches
+            
+            if display_matches:
+                return gr.Radio(choices=display_matches, visible=True)
             else:
-                # Treat as description - don't show suggestions, keep current value
-                return gr.Dropdown(choices=[], value=query)
+                return gr.Radio(choices=[], visible=False)
         
         def format_selected_movies_display(movies):
             """Format selected movies with remove buttons on same line"""
@@ -380,7 +382,7 @@ def create_interface():
         def update_delete_buttons_visibility(movies):
             """Update visibility and labels of delete buttons"""
             button_updates = []
-            for i in range(5):
+            for i in range(20):  # Support up to 20 movies
                 if i < len(movies):
                     movie_name = movies[i][:40] + ("..." if len(movies[i]) > 40 else "")
                     button_updates.append(gr.Button(f"🗑️ {movie_name}", visible=True, size="sm", variant="secondary"))
@@ -397,20 +399,19 @@ def create_interface():
             current_movies.pop(index)
             return current_movies, format_selected_movies_display(current_movies)
 
-        def handle_selection(selected_value, current_movies):
-            """Handle movie selection from ONE field"""
-            if not selected_value:
+        def handle_movie_selection(selected_movie, current_movies):
+            """Handle movie selection from radio buttons"""
+            if not selected_movie:
                 return [current_movies, format_selected_movies_display(current_movies)] + update_delete_buttons_visibility(current_movies)
             
             # Check if it's a movie title (exists in our database)
-            if selected_value in recommender.title_to_id:
+            if selected_movie in recommender.title_to_id:
                 # It's a movie selection - add it to the list
                 current_movies = current_movies or []
-                if len(current_movies) >= 5:
-                    return [current_movies, format_selected_movies_display(current_movies)] + update_delete_buttons_visibility(current_movies)
+                # Remove the 5-movie limit - users can now select as many as they want
                     
-                if selected_value not in current_movies:
-                    current_movies.append(selected_value)
+                if selected_movie not in current_movies:
+                    current_movies.append(selected_movie)
                 
                 return [current_movies, format_selected_movies_display(current_movies)] + update_delete_buttons_visibility(current_movies)
             else:
@@ -452,8 +453,8 @@ def create_interface():
                 
                 # Print retrieval results
                 print(f"\nRETRIEVAL RESULTS: Found {len(recommendations)} candidates")
-                print("Top 10 from retrieval phase:")
-                for i, (title, score) in enumerate(recommendations[:10], 1):
+                print("Top 100 from retrieval phase:")
+                for i, (title, score) in enumerate(recommendations[:100], 1):
                     print(f"  {i:2d}. {title} (score: {score:.3f})")
                 
                 # RERANKING + EXPLANATION PHASE: Delegate to ranking_agent with streaming
@@ -482,15 +483,15 @@ def create_interface():
                 yield f"Error getting recommendations: {str(e)}"
 
         # Event handlers
-        movie_search.change(
-            fn=update_search_options,
-            inputs=movie_search,
-            outputs=movie_search
+        movie_search_input.change(
+            fn=update_search_results,
+            inputs=movie_search_input,
+            outputs=search_results
         )
         
-        movie_search.select(
-            fn=handle_selection,
-            inputs=[movie_search, selected_movies],
+        search_results.change(
+            fn=handle_movie_selection,
+            inputs=[search_results, selected_movies],
             outputs=[selected_movies, selected_display] + delete_buttons
         )
         
