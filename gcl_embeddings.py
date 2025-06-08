@@ -1,10 +1,10 @@
 from typing import Dict, Any, Optional, List
 import numpy as np
+import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
 from sklearn.preprocessing import normalize
 import os
-import pandas as pd
 
 class GCLProcessor:
     def __init__(self, data_dir: str = "amazon_movies_2023", n_layers: int = 1) -> None:
