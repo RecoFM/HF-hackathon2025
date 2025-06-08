@@ -1,5 +1,5 @@
 # Movie Recommender System
-
+**Tag:** `agent-demo-track`
 A hybrid movie recommender system that combines collaborative filtering, language model embeddings, and graph convolutional networks to provide personalized movie recommendations.
 
 ## Features
