@@ -164,9 +164,6 @@ The system follows a multi-stage pipeline that processes movie data and user cur
 
 ### Pipeline Stages
 
-The complete preprocessing pipeline code is available in our GitHub repository:
-🔗 **[Preprocessing Code](https://github.com/RecoFM/HF-hackathon2025)**
-
 #### 1. Preprocessing Stage
 - **Movie Title Processing**: Raw movie titles are converted into semantic embeddings using Mistral AI
 - **Graph Convolution Enhancement**: Movie embeddings are enriched through Graph Convolution Layers (GCL) that capture user interaction patterns and movie relationships
