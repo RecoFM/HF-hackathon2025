@@ -13,7 +13,6 @@ from ranking_agent import rank_with_ai
 from scipy.sparse import load_npz
 from rapidfuzz import process, fuzz
 import re
-from sklearn.metrics.pairwise import cosine_similarity
 
 load_dotenv()
 
@@ -266,11 +265,11 @@ def create_interface():
         gr.Markdown(
         """
         # Movie Recommender
-        Get personalized movie recommendations based on your taste and preferences!
+        Get personalized movie recommendations based on your taste and preferences utilizing zero-shot predicitons from Foundation Recommender!
         
         **How to use:**
-        1. Search and select movies you've enjoyed (no limit!)
-        2. Describe what kind of movie you're looking for (optional)
+        1. Search and select movies you've enjoyed
+        2. Describe the type of film you are looking for. Consider factors such as genre, length, whether it is animated, etc.
         3. Adjust the preference weight (α) to balance between your description and movie history
         4. Get personalized recommendations
         """
@@ -316,7 +315,7 @@ def create_interface():
                 # User preferences text field
                 user_preferences = gr.Textbox(
                     label="Describe what kind of movie you're looking for",
-                    placeholder="E.g., 'A thrilling sci-fi movie with deep philosophical themes'",
+                    placeholder="E.g., 'A movie with a female main character'",
                     lines=3
                 )
                 
